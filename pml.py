@@ -302,7 +302,7 @@ async def _(event):  # sourcery no-metrics
 
 @catub.cat_cmd(
     pattern="pml add(?:\s|$)(.*)",
-    command=("pml", plugin_category),
+    command=("pmladd", plugin_category),
     info={
         "header": "Add a user to the PML monitored list.",
         "description": "Forward messages from the specified user to the PM log group.",
@@ -331,7 +331,7 @@ async def _(event):  # sourcery no-metrics
 
 @catub.cat_cmd(
     pattern="pml del(?:\s|$)(.*)",
-    command=("pml", plugin_category),
+    command=("pmldel", plugin_category),
     info={
         "header": "Remove a user from the PML monitored list.",
         "description": "Stop logging messages for the specified user.",
@@ -359,7 +359,7 @@ async def _(event):  # sourcery no-metrics
 
 @catub.cat_cmd(
     pattern="pml time(?:\s|$)(\d+)$",
-    command=("pml", plugin_category),
+    command=("pmltime", plugin_category),
     info={
         "header": "Set temporary logging duration for new contacts.",
         "description": (
