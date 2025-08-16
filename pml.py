@@ -264,6 +264,13 @@ def get_temp_expiry(user_id: int) -> Optional[int]:
     finally:
         SESSION.close()
 
+def _is_int_like(s: str) -> bool:
+    try:
+        int(s)
+        return True
+    except (TypeError, ValueError):
+        return False
+
 
 # State management for the SDP (self‑destructive preservation) feature
 def _is_sdp_enabled() -> bool:
@@ -476,6 +483,8 @@ async def _(event):  # sourcery no-metrics
     if not user_str:
         # Default to current chat
         user_id = event.chat_id
+    elif _is_int_like(user_str):
+        user_id = int(user_str)
     else:
         try:
             entity = await event.client.get_entity(user_str)
@@ -504,6 +513,8 @@ async def _(event):  # sourcery no-metrics
     user_str = event.pattern_match.group(1).strip()
     if not user_str:
         user_id = event.chat_id
+    elif _is_int_like(user_str):
+        user_id = int(user_str)
     else:
         try:
             entity = await event.client.get_entity(user_str)
