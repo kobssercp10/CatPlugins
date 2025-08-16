@@ -34,6 +34,27 @@ Commands
 {tr}pml time <minutes>
     Specify how long (in minutes) new contacts should be logged.  A
     value of ``0`` disables temporary logging of unknown contacts.
+
+{tr}pml list
+    Show the list of users whose messages are being logged.  Temporary users
+    will display how many minutes remain until they expire.
+
+{tr}sdp on/off
+    Enable or disable the self‑destructive media saver (SDP).  When
+    enabled, any self‑destructive photos or videos you receive are
+    automatically downloaded and re‑uploaded to the PM logger group with a
+    spoiler.
+
+{tr}sdp add <word>
+    Add a trigger word.  When you reply with just this word to a
+    self‑destructive media message, it will be saved regardless of whether
+    SDP is currently on or off.
+
+{tr}sdp del <word>
+    Remove a trigger word from the list.
+
+{tr}sdp list
+    List all trigger words currently configured for SDP.
 ```
 
 Note: this plugin relies on the SQLAlchemy session and base classes
@@ -43,10 +64,15 @@ persistently in the bot's database.
 """
 
 from datetime import datetime, timedelta
+import os
+import json
+from pathlib import Path
 from typing import List, Optional
 
 from telethon import events
 from telethon.tl.types import User
+from telethon.tl.types import DocumentAttributeFilename
+from telethon.errors import RPCError
 
 from userbot import catub
 from userbot.Config import Config
@@ -224,6 +250,141 @@ def remove_message_mapping(chat_id: int, message_id: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Additional helpers for PML and SDP functionality
+
+def get_temp_expiry(user_id: int) -> Optional[int]:
+    """Return the expiry timestamp for a temporary user or None."""
+    try:
+        row = (
+            SESSION.query(PMLTempUser)
+            .filter(PMLTempUser.user_id == user_id)
+            .one_or_none()
+        )
+        return int(row.expiry) if row else None
+    finally:
+        SESSION.close()
+
+
+# State management for the SDP (self‑destructive preservation) feature
+def _is_sdp_enabled() -> bool:
+    """Check whether the self‑destructive media saver is enabled."""
+    val = gvarstatus("SDP")
+    # Default is disabled if not set
+    return val != "false" if val is not None else False
+
+
+def _set_sdp_enabled(enabled: bool) -> None:
+    """Set the SDP on/off state."""
+    addgvar("SDP", "true" if enabled else "false")
+
+
+def _get_sdp_words() -> List[str]:
+    """Retrieve the list of trigger words for SDP from global variables."""
+    val = gvarstatus("SDP_WORDS")
+    if not val:
+        return []
+    try:
+        # Stored as JSON list if possible
+        words = json.loads(val)
+        if isinstance(words, list):
+            return [str(w) for w in words]
+    except Exception:
+        # Fallback: assume space‑separated string
+        return [w for w in val.split()] if val else []
+    return []
+
+
+def _set_sdp_words(words: List[str]) -> None:
+    """Persist the list of trigger words for SDP as JSON."""
+    try:
+        addgvar("SDP_WORDS", json.dumps(words))
+    except Exception:
+        # Fallback to space‑separated
+        addgvar("SDP_WORDS", " ".join(words))
+
+
+def _add_sdp_word(word: str) -> bool:
+    """Add a word to the SDP trigger list; return True if added, False if already present."""
+    word = word.strip()
+    if not word:
+        return False
+    words = _get_sdp_words()
+    if word in words:
+        return False
+    words.append(word)
+    _set_sdp_words(words)
+    return True
+
+
+def _remove_sdp_word(word: str) -> bool:
+    """Remove a word from the SDP trigger list; return True if removed."""
+    word = word.strip()
+    words = _get_sdp_words()
+    if word not in words:
+        return False
+    words.remove(word)
+    _set_sdp_words(words)
+    return True
+
+
+async def _save_self_destruct_media(message, client) -> Optional[str]:  # sourcery no-metrics
+    """
+    Download a self‑destructive media message and upload it to the PM log group with spoiler.
+
+    Returns a string describing the result or None if not a self‑destructive media.
+    """
+    # Ensure the message actually contains TTL media
+    media = message.media if hasattr(message, "media") else None
+    ttl = None
+    if media is not None:
+        # Both Photo and Document may have .ttl_seconds attribute under .ttl_seconds or inside media
+        ttl = getattr(media, "ttl_seconds", None)
+        if ttl is None and hasattr(media, "photo"):
+            ttl = getattr(media.photo, "ttl_seconds", None)
+    if ttl is None:
+        return None
+    # Download to temporary directory
+    try:
+        downloads_dir = Path("/tmp/catuserbot_sdp_downloads")
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        file_path = await client.download_media(message, file=str(downloads_dir))
+    except Exception as e:
+        LOGS.warning(f"SDP: Failed to download media: {e}")
+        return "Failed to download media."
+    # Compose caption
+    try:
+        sender = await message.get_sender()
+        # mention using tg://user
+        first_name = sender.first_name or (sender.title if hasattr(sender, "title") else "Unknown")
+        mention = f"[{first_name}](tg://user?id={sender.id})"
+    except Exception:
+        mention = f"ID {message.sender_id}"
+    sent_at = message.date.strftime("%Y-%m-%d %H:%M:%S")
+    orig_caption = message.message or ""
+    caption = (
+        "🔐 **Self‑destructive media saved**\n"
+        f"**From:** {mention}\n"
+        f"**Sent at:** `{sent_at}`\n"
+    )
+    if orig_caption:
+        caption += f"**Original caption:** {orig_caption}"
+    # Upload with spoiler
+    try:
+        await client.send_file(
+            Config.PM_LOGGER_GROUP_ID,
+            file_path,
+            caption=caption,
+            silent=True,
+            spoiler=True,
+        )
+        return None
+    except RPCError as e:
+        LOGS.warning(f"SDP: Failed to send media: {e}")
+        return "Failed to upload media."
+
+
+
+# ---------------------------------------------------------------------------
 # Plugin state management
 
 def _is_pml_enabled() -> bool:
@@ -386,6 +547,127 @@ async def _(event):  # sourcery no-metrics
     )
 
 
+@catub.cat_cmd(
+    pattern="pml list$",
+    command=("pmllist", plugin_category),
+    info={
+        "header": "Show the list of users monitored by PML.",
+        "description": (
+            "Display all users whose private messages are currently being logged. "
+            "Temporary users will also display the remaining time."
+        ),
+        "usage": ["{tr}pml list"],
+    },
+)
+async def _(event):  # sourcery no-metrics
+    """List monitored users along with remaining temporary logging time."""
+    users = get_all_monitored_users()
+    if not users:
+        return await edit_or_reply(event, "`No users are currently being monitored.`")
+    lines = []
+    now = int(datetime.utcnow().timestamp())
+    for uid in users:
+        try:
+            entity = await event.client.get_entity(uid)
+            name = entity.first_name or (entity.title if hasattr(entity, "title") else str(uid))
+            mention = f"[{name}](tg://user?id={uid})"
+        except Exception:
+            mention = f"ID {uid}"
+        expiry = get_temp_expiry(uid)
+        if expiry and expiry > now:
+            remaining = expiry - now
+            # Show in minutes, rounding up
+            mins = (remaining + 59) // 60
+            lines.append(f"• {mention} (temporary, {mins}m left)")
+        else:
+            lines.append(f"• {mention}")
+    message = "**PML monitored users:**\n" + "\n".join(lines)
+    return await edit_or_reply(event, message)
+
+
+@catub.cat_cmd(
+    pattern="sdp (on|off)$",
+    command=("sdp", plugin_category),
+    info={
+        "header": "Toggle saving of self‑destructive media.",
+        "description": (
+            "When enabled, any self‑destructive photos/videos you receive will be saved to the PM log group."
+        ),
+        "usage": ["{tr}sdp on", "{tr}sdp off"],
+    },
+)
+async def _(event):  # sourcery no-metrics
+    """Enable or disable saving of self‑destructive media."""
+    state = event.pattern_match.group(1)
+    if state == "on":
+        if _is_sdp_enabled():
+            return await edit_delete(event, "`SDP is already enabled.`", 5)
+        _set_sdp_enabled(True)
+        return await edit_delete(event, "`Self‑destructive media saving enabled.`", 5)
+    else:
+        if not _is_sdp_enabled():
+            return await edit_delete(event, "`SDP is already disabled.`", 5)
+        _set_sdp_enabled(False)
+        return await edit_delete(event, "`Self‑destructive media saving disabled.`", 5)
+
+
+@catub.cat_cmd(
+    pattern="sdp add(?:\s|$)(.+)",
+    command=("sdpadd", plugin_category),
+    info={
+        "header": "Add a trigger word for saving self‑destructive media.",
+        "description": (
+            "When you reply with just this word to a self‑destructive media, it will be saved even if SDP is off."
+        ),
+        "usage": ["{tr}sdp add wait"],
+    },
+)
+async def _(event):  # sourcery no-metrics
+    word = event.pattern_match.group(1).strip()
+    if not word:
+        return await edit_delete(event, "`Please specify a word to add.`", 5)
+    if _add_sdp_word(word):
+        return await edit_delete(event, f"`Added '{word}' to SDP trigger words.`", 5)
+    else:
+        return await edit_delete(event, f"`'{word}' is already in SDP trigger words.`", 5)
+
+
+@catub.cat_cmd(
+    pattern="sdp del(?:\s|$)(.+)",
+    command=("sdpdel", plugin_category),
+    info={
+        "header": "Remove a trigger word for saving self‑destructive media.",
+        "description": "Stop using this word to manually save self‑destructive media.",
+        "usage": ["{tr}sdp del wait"],
+    },
+)
+async def _(event):  # sourcery no-metrics
+    word = event.pattern_match.group(1).strip()
+    if not word:
+        return await edit_delete(event, "`Please specify a word to remove.`", 5)
+    if _remove_sdp_word(word):
+        return await edit_delete(event, f"`Removed '{word}' from SDP trigger words.`", 5)
+    else:
+        return await edit_delete(event, f"`'{word}' was not found in SDP trigger words.`", 5)
+
+
+@catub.cat_cmd(
+    pattern="sdp list$",
+    command=("sdplist", plugin_category),
+    info={
+        "header": "List SDP trigger words.",
+        "description": "Show all words that trigger saving of self‑destructive media when replied.",
+        "usage": ["{tr}sdp list"],
+    },
+)
+async def _(event):  # sourcery no-metrics
+    words = _get_sdp_words()
+    if not words:
+        return await edit_or_reply(event, "`No SDP trigger words have been set.`")
+    items = "\n".join(f"• {w}" for w in words)
+    return await edit_or_reply(event, f"**SDP trigger words:**\n{items}")
+
+
 # ---------------------------------------------------------------------------
 # Message handlers
 
@@ -460,3 +742,59 @@ async def _pml_deleted_handler(event):  # sourcery no-metrics
                 LOGS.warning(f"PML delete notification failed: {e}")
             # Remove mapping to avoid duplicate notifications
             remove_message_mapping(event.chat_id, msg_id)
+
+
+# ---------------------------------------------------------------------------
+# Self‑destructive media handlers
+
+@catub.on(events.NewMessage(incoming=True))
+async def _sdp_auto_handler(event):  # sourcery no-metrics
+    """Automatically save self‑destructive media when SDP is enabled."""
+    # Skip messages from the PM log group itself
+    if event.chat_id == Config.PM_LOGGER_GROUP_ID:
+        return
+    # Only act on incoming messages that contain media with a TTL
+    if not _is_sdp_enabled():
+        return
+    msg = event.message
+    if not msg:
+        return
+    # Ensure there is media and TTL
+    media = getattr(msg, "media", None)
+    ttl = None
+    if media is not None:
+        ttl = getattr(media, "ttl_seconds", None)
+        if ttl is None and hasattr(media, "photo"):
+            ttl = getattr(media.photo, "ttl_seconds", None)
+    if ttl is None:
+        return
+    # Save the media
+    await _save_self_destruct_media(msg, event.client)
+
+
+@catub.on(events.NewMessage(outgoing=True))
+async def _sdp_manual_handler(event):  # sourcery no-metrics
+    """Manually trigger saving of self‑destructive media using a trigger word."""
+    # We only handle simple messages (no commands) sent by the user
+    if not event.is_reply:
+        return
+    text = (event.raw_text or "").strip()
+    if not text:
+        return
+    # Message must not start with command prefixes
+    if text.startswith(('.', '/', '!', '#')):
+        return
+    words = _get_sdp_words()
+    if not words:
+        return
+    if text not in words:
+        return
+    # Fetch the message being replied to
+    try:
+        reply_msg = await event.get_reply_message()
+    except Exception:
+        return
+    if not reply_msg:
+        return
+    # Save regardless of SDP state
+    await _save_self_destruct_media(reply_msg, event.client)
