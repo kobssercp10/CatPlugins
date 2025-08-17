@@ -241,12 +241,12 @@ def get_logger_message_id(chat_id: int, message_id: int) -> Optional[int]:
         row = (
             SESSION.query(PMLMessageMap)
             .filter(
-                PMLMessageMap.chat_id == chat_id,
+                # PMLMessageMap.chat_id == chat_id,
                 PMLMessageMap.message_id == message_id,
             )
             .one_or_none()
         )
-        return int(row.logger_message_id) if row else None
+        return (int(row.logger_message_id), row.chat_id) if row else (None, None)
     finally:
         SESSION.close()
 
@@ -744,16 +744,16 @@ async def _pml_deleted_handler(event):  # sourcery no-metrics
         return
     # event.deleted_ids may contain multiple message IDs
     for msg_id in event.deleted_ids:
-        logger_id = get_logger_message_id(event.chat_id, msg_id)
+        logger_id, chat_id = get_logger_message_id(event.chat_id, msg_id)
         if logger_id:
             # Compose a notification.  Mention the user using a telegra.ph link
             try:
-                sender = await catub.get_entity(event.chat_id)
-                mention = f"{sender.first_name} (ID: {sender.id})"
+                sender = await catub.get_entity(chat_id)
+                mention = f"[{sender.first_name}](tg://user?id={sender.id}) (ID: {sender.id})"
             except Exception:
-                mention = f"ID {event.chat_id}"
+                mention = f"ID {chat_id}"
             notif = (
-                f"🗑️ A message from {mention} was deleted in your private chat."
+                f"🗑️ A message was deleted in your private chat\n👤 {mention}\n🆔 {msg_id}"
             )
             try:
                 # Reply to the forwarded message in the PM log group to
@@ -766,7 +766,7 @@ async def _pml_deleted_handler(event):  # sourcery no-metrics
             except Exception as e:
                 LOGS.warning(f"PML delete notification failed: {e}")
             # Remove mapping to avoid duplicate notifications
-            remove_message_mapping(event.chat_id, msg_id)
+            remove_message_mapping(chat_id, msg_id)
 
 
 # ---------------------------------------------------------------------------
