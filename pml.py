@@ -221,6 +221,16 @@ def is_temp_user(user_id: int) -> bool:
     )
 
 
+def get_all_temp_users():
+    """Return a list of (user_id, minutes_left) for temp users still valid."""
+    now = int(datetime.utcnow().timestamp())
+    rows = SESSION.query(PMLTempUser).filter(PMLTempUser.expiry > now).all()
+    result = []
+    for row in rows:
+        mins_left = int((row.expiry - now) / 60)
+        result.append((int(row.user_id), mins_left))
+    return result
+
 def add_message_mapping(chat_id: int, message_id: int, logger_id: int) -> None:
     SESSION.add(PMLMessageMap(chat_id, message_id, logger_id))
     SESSION.commit()
@@ -563,37 +573,41 @@ async def _(event):  # sourcery no-metrics
     command=("pmllist", plugin_category),
     info={
         "header": "Show the list of users monitored by PML.",
-        "description": (
-            "Display all users whose private messages are currently being logged. "
-            "Temporary users will also display the remaining time."
-        ),
-        "usage": ["{tr}pml list"],
+        "description": "Displays permanent and temporary users with mentions.",
+        "usage": "{tr}pml list",
     },
 )
-async def _(event):  # sourcery no-metrics
-    """List monitored users along with remaining temporary logging time."""
+async def _(event):
     users = get_all_monitored_users()
-    if not users:
-        return await edit_or_reply(event, "`No users are currently being monitored.`")
+    temp_users = get_all_temp_users()
+
+    if not users and not temp_users:
+        return await edit_delete(event, "`No users in PML list.`", 5)
+
     lines = []
-    now = int(datetime.utcnow().timestamp())
+
+    # Permanent
     for uid in users:
         try:
-            entity = await event.client.get_entity(uid)
-            name = entity.first_name or (entity.title if hasattr(entity, "title") else str(uid))
-            mention = f"[{name}](tg://user?id={uid})"
+            print(uid)
+            ent = await event.client.get_entity(uid)
+            name = ent.first_name or "Unknown"
+            print(name)
         except Exception:
-            mention = f"ID {uid}"
-        expiry = get_temp_expiry(uid)
-        if expiry and expiry > now:
-            remaining = expiry - now
-            # Show in minutes, rounding up
-            mins = (remaining + 59) // 60
-            lines.append(f"• {mention} (temporary, {mins}m left)")
-        else:
-            lines.append(f"• {mention}")
-    message = "**PML monitored users:**\n" + "\n".join(lines)
-    return await edit_or_reply(event, message)
+            name = f"User {uid}"
+        lines.append(f"• [{name}](tg://user?id={uid})")
+
+    # Temporary
+    for uid, mins_left in temp_users:
+        try:
+            ent = await event.client.get_entity(uid)
+            name = ent.first_name or "Unknown"
+        except Exception:
+            name = f"User {uid}"
+        lines.append(f"• [{name}](tg://user?id={uid}) (temp, {mins_left} min left)")
+
+    msg = "**📋 PML Users:**\n" + "\n".join(lines)
+    await edit_or_reply(event, msg)
 
 
 @catub.cat_cmd(
