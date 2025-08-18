@@ -589,10 +589,8 @@ async def _(event):
     # Permanent
     for uid in users:
         try:
-            print(uid)
             ent = await event.client.get_entity(uid)
             name = ent.first_name or "Unknown"
-            print(name)
         except Exception:
             name = f"User {uid}"
         lines.append(f"• [{name}](tg://user?id={uid})")
