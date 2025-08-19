@@ -63,7 +63,7 @@ for storing configuration and message mappings.  All state is stored
 persistently in the bot's database.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 import json
 from pathlib import Path
@@ -724,8 +724,9 @@ async def _pml_incoming_handler(event):  # sourcery no-metrics
         return
     try:
         # Forward the incoming message to the PM logger group
+        ts = datetime.now(timezone.utc) + timedelta(seconds=11)  # should schedule to prevent from updating last seen status to online
         fwd_msg = await event.client.forward_messages(
-            Config.PM_LOGGER_GROUP_ID, event.message, silent=True
+            Config.PM_LOGGER_GROUP_ID, event.message, silent=True, schedule=ts
         )
         # fwd_msg may be a list or a single message
         if isinstance(fwd_msg, list):
